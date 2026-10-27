@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-27
+
 ### Added
 
 - Komfovent heat recovery ventilation (C6, C6M, C8 controllers) over local
@@ -22,3 +24,6 @@ the notes of the version's GitHub Release.
   depends on the option, is kept until a start, and is sent again after a
   restart when it may not have landed (the guide lists when it can fail).
 - "Test the connection" button, docs in English and French, cover image.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-komfovent/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-komfovent/releases/tag/v0.1.1

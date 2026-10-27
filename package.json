@@ -1,6 +1,6 @@
 {
   "name": "gladys-komfovent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for Komfovent heat recovery ventilation (C6, C6M, C8 controllers) over local Modbus TCP: temperatures, fan levels, mode, filter, efficiency, air quality, alarms; optional mode and start commands, stop never held back. Unofficial, not affiliated with Komfovent.",
   "type": "module",
