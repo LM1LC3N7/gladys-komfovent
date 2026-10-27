@@ -32,6 +32,11 @@ up to date at the end of every milestone.
       the resends, a press at the end of a running stop starts a new one,
       /data that never answers no longer holds a read (500 ms), one wall
       clock reading in `firstWait`. Tests `r1 …` in `test/app.test.js`.
+- [x] **Review r2** (2026-10-27): APPROUVÉ, no blocker.
+- [ ] **Next patch — review r2 leftovers**: tests for `attemptSaveWait`
+      (/data stuck), the 60 s margin of `firstWait` and the floor of
+      `schedule`; a stop pressed in the last second of a stop in flight may
+      ack after 5 s (the stop still leaves).
 - [ ] **Milestone 2 — real unit**: run against a real C6 / C8 (see "To check").
 - [ ] **Milestone 3 — more**: air flows (once the core has an air flow unit),
       alarm reset (600 = 0x99C6) and filter reset (1051) as buttons behind
