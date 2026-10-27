@@ -185,11 +185,17 @@ export const POLL_INTERVAL = {
   default: 60,
 };
 
-/** The Modbus unit id of the configuration (hass-komfovent's default: 254). */
+/**
+ * The Modbus unit id of the configuration. The manuals give no unit id for
+ * Modbus TCP (only the RTU "protocol ID", set on the unit's web page), and
+ * hass-komfovent sends none: pymodbus then sends its default, 1 (its
+ * `DEFAULT_SLAVE_ID = 254` is never read). So 1, changeable in the
+ * configuration; an answer carrying another unit id is accepted (client.js).
+ */
 export const UNIT_ID = {
   min: 1,
   max: 255,
-  default: 254,
+  default: 1,
 };
 
 /** Plausible values (anything else is not a measure). */
@@ -197,7 +203,11 @@ export const RANGES = {
   /** Manual: -500..1200 tenths of a degree (C8: 30000 "sensor not used", panel -32768 "not connected"). */
   temperature: [-50, 120],
   percent: [0, 100],
-  /** hass-komfovent bounds the CO2 to 5000 ppm. */
+  /**
+   * The manuals give 0-65535 ppm; hass-komfovent drops anything over 2500 ppm.
+   * 5000 keeps a badly ventilated room visible (a CO2 sensor reads up to
+   * 2000-5000 ppm) while 65535 and other junk stay unknown.
+   */
   co2: [0, 5000],
 };
 
@@ -253,6 +263,12 @@ export const TIMINGS = {
   followUps: [5 * SECOND, 20 * SECOND],
   /** A sent command keeps its guard until a read shows what it asked, or 90 s. */
   guard: 90 * SECOND,
+  /** A read waits this long at most for /data to keep its time before it starts (never blocking). */
+  attemptSaveWait: 500,
+  /** A poll due while a command or a stop holds the line is tried again this much later. */
+  busyRetry: SECOND,
+  /** A stop pressed while one runs with less than this left of its window starts a new one after it. */
+  stopJoinMin: SECOND,
   /** The stop waits this long at most for /data to keep it before its first byte (never blocking). */
   stopSaveWait: 150,
   /** A stop not confirmed is reaffirmed by the next reads, three times at most. */

@@ -94,8 +94,8 @@ export const T = {
       `Centrale acceptée avec la régulation ${seen} : les commandes suivent de nouveau l’option.`,
     ),
   badUnitId: both(
-    'Invalid Modbus unit id: a whole number from 1 to 255 (254 by default). Nothing is read.',
-    'Identifiant d’unité Modbus invalide : un nombre entier de 1 à 255 (254 par défaut). Rien n’est lu.',
+    'Invalid Modbus unit id: a whole number from 1 to 255 (1 by default). Nothing is read.',
+    'Identifiant d’unité Modbus invalide : un nombre entier de 1 à 255 (1 par défaut). Rien n’est lu.',
   ),
   configUnread: (wait) =>
     both(

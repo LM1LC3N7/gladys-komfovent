@@ -19,8 +19,9 @@
 //   - an answer that arrives for an old configuration (generation) publishes
 //     nothing and sets no status; a read begun before a command left is not
 //     applied; a value not read this time is never republished as new;
-//   - a secondary block (alarms, sensor types, firmware) that fails never
-//     stops the values read before it.
+//   - a secondary block (alarms, sensor types, firmware) that fails (an
+//     exception, a timeout, a closed connection, a wrong answer) never costs
+//     the values read before it.
 //
 // Commands (mode, start):
 //   - refused unless "Allow the commands" is on, checked on arrival and again
@@ -143,6 +144,8 @@ export class KomfoventApp {
     /** The command in flight (one at a time), and the stop in flight. */
     this.inFlight = undefined;
     this.protecting = undefined;
+    /** The end of the window of the stop in flight (a press near its end starts a new one). */
+    this.protectUntil = -Infinity;
     /** Counts the stops: a command that sees it change before its write gives way. */
     this.protectSeq = 0;
     /** When the last write left (a read begun before it is not applied). */
@@ -339,11 +342,12 @@ export class KomfoventApp {
     if (stored === null) {
       return 0;
     }
-    // The wall time kept, as a time of the monotonic clock.
-    this.lastAttemptAt = Math.max(this.lastAttemptAt, this.mono() - (this.now() - stored));
+    // One reading of each clock: the wall time kept, as a time of the monotonic clock.
+    const now = this.now();
+    this.lastAttemptAt = Math.max(this.lastAttemptAt, this.mono() - (now - stored));
     // A read may have left up to a minute after the time kept (written at most once a minute).
     const due = stored + TIMINGS.attemptWriteEvery + this.interval;
-    return Math.min(this.interval, Math.max(0, due - this.now()));
+    return Math.min(this.interval, Math.max(0, due - now));
   }
 
   /**
@@ -583,6 +587,13 @@ export class KomfoventApp {
       }
       return await fn(session, record);
     } finally {
+      const other = record.session?.otherUnitId;
+      if (other !== undefined && other !== this.otherUnitIdLogged) {
+        this.otherUnitIdLogged = other;
+        this.logger.info(
+          `Komfovent: the unit answers with Modbus unit id ${other} (accepted; ${target?.unitId} asked)`,
+        );
+      }
       record.session?.close();
       if (this.active === record) {
         this.active = undefined;
@@ -666,9 +677,17 @@ export class KomfoventApp {
     if (stored === null || now - stored >= TIMINGS.attemptWriteEvery || now < stored) {
       this.memory.lastAttemptAt = now;
       if (!this.memoryUnreadable) {
-        await this.saveMemory().catch((err) =>
-          this.logger.warn(`Saving the state to /data failed: ${err.message}`),
-        );
+        // Waited for a moment only: a /data that never answers never stops the reads.
+        let timer;
+        await Promise.race([
+          this.saveMemory().catch((err) =>
+            this.logger.warn(`Saving the state to /data failed: ${err.message}`),
+          ),
+          new Promise((resolve) => {
+            timer = this.timers.setTimeout(resolve, TIMINGS.attemptSaveWait);
+          }),
+        ]);
+        this.timers.clearTimeout(timer);
       }
     }
   }
@@ -679,8 +698,8 @@ export class KomfoventApp {
       return;
     }
     if (this.active || this.reserved > 0) {
-      // A command holds the line: the poll waits for the next turn.
-      this.schedule();
+      // A command or a stop holds the line: the poll is tried again a second later.
+      this.schedule(TIMINGS.busyRetry);
       return;
     }
     const startedAt = this.mono();
@@ -689,7 +708,8 @@ export class KomfoventApp {
       return;
     }
     if (this.active || this.reserved > 0) {
-      this.schedule();
+      // Taken while /data kept the time of this read: never two connections.
+      this.schedule(TIMINGS.busyRetry);
       return;
     }
     let values;
@@ -734,6 +754,8 @@ export class KomfoventApp {
   async readAll(session) {
     const values = {};
     let answered = 0;
+    const read = new Set();
+    const stateRead = () => [...STATE_BLOCKS].every((key) => read.has(key));
     const late = (b) => STATE_BLOCKS.has(b.key) && this.timeouts.has(b.key);
     const order = [...BLOCKS.filter((b) => !late(b)), ...BLOCKS.filter(late)];
     for (const block of order) {
@@ -741,9 +763,9 @@ export class KomfoventApp {
       if (skippedUntil !== undefined && this.mono() < skippedUntil) {
         continue;
       }
-      let read;
+      let decoded;
       try {
-        read = await this.readBlock(session, block.key, { timeoutMs: TIMINGS.requestTimeout });
+        decoded = await this.readBlock(session, block.key, { timeoutMs: TIMINGS.requestTimeout });
       } catch (err) {
         if (err.kind === ERROR_KINDS.REFUSED) {
           answered += 1;
@@ -758,6 +780,22 @@ export class KomfoventApp {
             this.skipped.set(block.key, this.mono() + TIMINGS.blockRetry);
           }
           continue;
+        }
+        if (
+          !STATE_BLOCKS.has(block.key) &&
+          stateRead() &&
+          [ERROR_KINDS.CLOSED, ERROR_KINDS.PROTOCOL].includes(err.kind)
+        ) {
+          // A secondary block that ends the session (closed, wrong answer) never
+          // costs the values read before it: skipped, tried again every hour; the
+          // next read starts afresh on a new connection.
+          if (skippedUntil === undefined) {
+            this.logger.warn(
+              `Komfovent: block ${block.key} failed (${errorReason(err)}), tried again every hour`,
+            );
+          }
+          this.skipped.set(block.key, this.mono() + TIMINGS.blockRetry);
+          return values;
         }
         if (err.kind === ERROR_KINDS.TIMEOUT && answered > 0) {
           const count = (this.timeouts.get(block.key) ?? 0) + 1;
@@ -781,7 +819,8 @@ export class KomfoventApp {
       answered += 1;
       this.timeouts.delete(block.key);
       this.skipped.delete(block.key);
-      Object.assign(values, read);
+      read.add(block.key);
+      Object.assign(values, decoded);
     }
     return values;
   }
@@ -1080,11 +1119,11 @@ export class KomfoventApp {
     if (command.protective) {
       // The address of the configuration, else (configuration not read yet) the
       // one the kept stop was sent to, else the last one kept in /data.
-      const target = this.started
-        ? this.configTarget()
-        : ((this.stopGuard ? this.guardTarget(this.stopGuard) : undefined) ??
-          this.memory.target ??
-          undefined);
+      const target =
+        this.configTarget() ??
+        (this.stopGuard ? this.guardTarget(this.stopGuard) : undefined) ??
+        this.memory.target ??
+        undefined;
       if (!target) {
         throw this.refusal(ERRORS.noHost);
       }
@@ -1312,6 +1351,7 @@ export class KomfoventApp {
     const request = writeRequest(command.write, plan.written);
     const previousStart = this.lastStartAt;
     const previousOpen = this.startOpen;
+    const previousGuard = this.stopGuard;
     let echo;
     try {
       echo = await session.request(request, {
@@ -1340,6 +1380,11 @@ export class KomfoventApp {
         state.refused = true;
         this.lastStartAt = previousStart;
         this.startOpen = previousOpen;
+        if (command.starts && previousGuard && !this.stopGuard) {
+          // The start was not applied: the unit stays stopped, and the stop stays kept.
+          this.stopGuard = previousGuard;
+          this.persistStopGuard().catch(() => {});
+        }
       }
       throw err;
     }
@@ -1371,11 +1416,17 @@ export class KomfoventApp {
   // --- The stop (protective) -----------------------------------------------
 
   /** A second press while one runs joins it. */
-  async protect(plan, received, target = this.configTarget()) {
+  async protect(plan, received, target = this.configTarget(), { reassert = false } = {}) {
     if (this.protecting) {
-      return this.protecting;
+      if (this.protectUntil - this.mono() >= TIMINGS.stopJoinMin) {
+        return this.protecting;
+      }
+      // The stop running has almost no time left: a new one follows it.
+      await this.protecting.catch(() => {});
+      return this.protect(plan, this.mono(), target, { reassert });
     }
-    const promise = this.sendStop(plan, received, target);
+    this.protectUntil = received + TIMINGS.commandSendBy;
+    const promise = this.sendStop(plan, received, target, { reassert });
     this.protecting = promise;
     try {
       return await promise;
@@ -1395,7 +1446,7 @@ export class KomfoventApp {
    * and the answer says whether it was written yet. Kept afterwards (see the
    * header).
    */
-  async sendStop(plan, received, target) {
+  async sendStop(plan, received, target, { reassert = false } = {}) {
     // A command not written yet gives way (checked right before its write).
     this.protectSeq += 1;
     // A start or a mode that may have left before this stop and is not
@@ -1414,7 +1465,8 @@ export class KomfoventApp {
       pending: true,
       seenOff: false,
       onReads: 0,
-      reasserts: previous?.reasserts ?? 0,
+      // A press starts the count again; a resend by the reads keeps it.
+      reasserts: reassert ? (previous?.reasserts ?? 0) : 0,
       sticky,
     };
     const saved = this.persistStopGuard().catch(() => {});
@@ -1640,8 +1692,8 @@ export class KomfoventApp {
       if (generation !== this.generation || this.ownGuard() !== stop) {
         return;
       }
-      this.protect(STOP_PLAN, this.mono(), this.guardTarget(stop)).catch((err) =>
-        this.logger.warn(`Komfovent: stop sent again: ${err.message}`),
+      this.protect(STOP_PLAN, this.mono(), this.guardTarget(stop), { reassert: true }).catch(
+        (err) => this.logger.warn(`Komfovent: stop sent again: ${err.message}`),
       );
     }, TIMINGS.reassertDelay);
   }

@@ -160,7 +160,6 @@ export function decodeBlock(block, data) {
       const decoded = decodeFirmware(word(1000), word(1001));
       if (decoded) {
         values.controller = decoded.controller;
-        values.firmware = decoded.firmware;
       }
       break;
     }

@@ -11,8 +11,8 @@ import { EventEmitter } from 'node:events';
 
 export const HOST = '192.168.1.80';
 export const NOW = Date.UTC(2026, 9, 27, 10, 0, 0);
-/** hass-komfovent's default unit id. */
-export const UNIT_ID = 254;
+/** The default unit id (pymodbus' default, which hass-komfovent sends). */
+export const UNIT_ID = 1;
 
 /** The firmware word of a C6 1.3.17.20 (type 0 in the top four bits). */
 export const C6_FIRMWARE = (0 << 28) | (1 << 24) | (3 << 20) | (17 << 12) | 20;
@@ -154,6 +154,11 @@ export function fakeKomfovent({ map = defaultMap() } = {}) {
     badEcho: false,
     /** Hosts connected to. */
     hosts: [],
+    /** "fc:register" keys whose request closes the connection, unanswered; writes that do so. */
+    closeOn: new Set(),
+    closeOnWrite: 0,
+    /** Called with the request when a write arrives (before it is applied). */
+    onWrite: undefined,
     handle(socket, frame) {
       const tid = frame.readUInt16BE(0);
       const uid = frame[6];
@@ -168,6 +173,12 @@ export function fakeKomfovent({ map = defaultMap() } = {}) {
           : { fc, register, count: arg, uid, host: socket.host },
       );
       const key = `${fc}:${register}`;
+      if (write) unit.onWrite?.({ register, value: arg });
+      if (unit.closeOn.has(key) || (write && unit.closeOnWrite > 0)) {
+        if (write) unit.closeOnWrite -= 1;
+        setTimeout(() => socket.destroy(), unit.delay);
+        return;
+      }
       if (unit.silent.has(key) || unit.silent.has(fc)) return;
       setTimeout(() => {
         if (socket.destroyed) {

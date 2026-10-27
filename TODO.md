@@ -22,16 +22,36 @@ up to date at the end of every milestone.
       unit" never held back and kept until a start, test button, docs
       en/fr, cover. Tested against a fake unit only (and a real TCP server
       of gladys-testkit at x20).
+- [x] **Review r1 fixes** (2026-10-27): unit id 1 by default and another
+      unit id in the answer accepted (B1); a secondary block that closes the
+      connection or answers wrong keeps the values (I1); tests for the
+      surviving mutants (I2); a poll due on a busy line retried 1 s later
+      (I3); the stop goes to the kept address when the configuration is
+      invalid (I4); minors: CO2 bound explained, outdoor humidity sensor
+      documented, a start refused by the unit keeps the stop, a press resets
+      the resends, a press at the end of a running stop starts a new one,
+      /data that never answers no longer holds a read (500 ms), one wall
+      clock reading in `firstWait`. Tests `r1 …` in `test/app.test.js`.
 - [ ] **Milestone 2 — real unit**: run against a real C6 / C8 (see "To check").
 - [ ] **Milestone 3 — more**: air flows (once the core has an air flow unit),
       alarm reset (600 = 0x99C6) and filter reset (1051) as buttons behind
       the option, ECO/AUTO, panel 2, VOC sensors, energy counters (lifetime
       counters: never 0 nor a drop published, a way out on reset).
+- [ ] **Identity**: add the unit's own IP address (registers 23-24, already in
+      the block 1-34) to the fingerprint (review r1): two units of the same
+      type, or another Modbus device whose register 1000 starts with nibble 0,
+      would then be told apart. Mind NAT / port forwarding (refuse only on a
+      positive mismatch, never on an unreadable value).
+- [ ] Mode and start without a connection retry: a single-client unit slow
+      to free its place right after a poll gives "not sent (closed)" (review
+      r1, m6; harmless, the user presses again).
 
 ## To check on a real unit
 
-- That the unit answers unit id 254 (hass-komfovent's default) on Modbus TCP,
-  and the five ranges as one request each.
+- Which unit id the unit answers on Modbus TCP (default 1: pymodbus' default,
+  what hass-komfovent actually sends; its `DEFAULT_SLAVE_ID = 254` is never
+  read), whether it echoes the id asked, and the five ranges as one request
+  each.
 - What register 5 reads right after a mode written (immediately, or after
   a delay: then "not applied yet" is the normal first answer).
 - Whether writing a mode on a unit off starts it (assumed: yes, so refused).
@@ -109,8 +129,13 @@ up to date at the end of every milestone.
   English text keys (`none`, `F9, W1`). VOC sensors are not published (the
   reference shows them in %, the core's VOC category is ppb only).
 - **Configuration**: IPv4 unicast (0.x, 224-255, x.x.x.0 and x.x.x.255
-  refused) or host name, optional port (502); unit id 1-255, default 254
-  (hass-komfovent's `DEFAULT_SLAVE_ID`); interval 30 s – 1 h. No secret.
+  refused) or host name, optional port (502); unit id 1-255, default 1 (review
+  r1, B1: the manuals give no unit id for Modbus TCP, only the RTU "protocol
+  ID" of the web page; hass-komfovent sends none, so pymodbus' default 1).
+  An answer carrying another unit id is accepted and logged once (one TCP
+  connection reaches one controller; some servers answer with their own id);
+  the transaction id, protocol, function and exact size are still checked.
+  Interval 30 s – 1 h. No secret.
 - **Manifest**: categories `climate`, `environment` (as the Salda Smarty);
   no `keywords` / `countries` (Komfovent is Lithuanian, sold in the EU:
   keywords "komfovent, domekt, kompakt, verso, ventilation, VMC double flux"

@@ -12,7 +12,8 @@ import { createFakeGladys } from '@gladysassistant/integration-sdk/testing';
 import { KomfoventApp } from '../src/app.js';
 import { HOUR, MINUTE, SECOND } from '../src/constants.js';
 import { registerHandlers } from '../src/handlers.js';
-import { memoryStore } from '../src/store.js';
+import { deviceStates } from '../src/devices.js';
+import { memoryStore, normalizeMemory } from '../src/store.js';
 import {
   C8_FIRMWARE,
   HOST,
@@ -163,15 +164,15 @@ test('discovery: one device, every value read and published, the exact requests'
   const badge = ctx.gladys.fake.transports.at(-1);
   assert.equal(badge.device_external_id ?? badge.external_id, DEVICE);
   assert.equal(badge.transport, DEVICE_TRANSPORTS.LOCAL);
-  // The ranges of hass-komfovent, function 3, unit id 254, one connection closed after.
+  // The ranges of hass-komfovent, function 3, unit id 1, one connection closed after.
   assert.deepEqual(
     ctx.unit.log.slice(0, 5).map((r) => [r.fc, r.register, r.count, r.uid]),
     [
-      [3, 1, 34, 254],
-      [3, 900, 56, 254],
-      [3, 600, 11, 254],
-      [3, 200, 15, 254],
-      [3, 1000, 2, 254],
+      [3, 1, 34, 1],
+      [3, 900, 56, 1],
+      [3, 600, 11, 1],
+      [3, 200, 15, 1],
+      [3, 1000, 2, 1],
     ],
   );
   assert.equal(ctx.unit.open.size, 0);
@@ -800,4 +801,388 @@ test('the period is start to start, even with a slow unit', async (t) => {
   for (const gap of gaps) {
     assert.ok(gap >= MINUTE && gap <= MINUTE + 200, `gap ${gap} ms`);
   }
+});
+
+// --- Review r1 ---------------------------------------------------------------
+
+test('r1 B1: unit id 1 by default; an answer with another unit id is accepted', async (t) => {
+  const unit = fakeKomfovent();
+  const handle = unit.handle;
+  unit.handle = (socket, frame) => {
+    // A controller that answers with its own id (254) whatever is asked.
+    const emit = socket.emit.bind(socket);
+    socket.emit = (event, data) => {
+      if (event === 'data') {
+        const out = Buffer.from(data);
+        out[6] = 254;
+        return emit(event, out);
+      }
+      return emit(event, data);
+    };
+    return handle(socket, frame);
+  };
+  const ctx = await setup(t, { unit });
+  assert.equal(ctx.unit.log[0].uid, 1);
+  assert.equal(ctx.state('temperature-supply').state, 18.5);
+  assert.equal(ctx.status().connected, true);
+  assert.ok(ctx.logs.some((l) => /unit id 254 \(accepted; 1 asked\)/.test(l)));
+  assert.equal((await ctx.press('stop')).success, true);
+});
+
+for (const register of [600, 200, 1000]) {
+  test(`r1 I1: block ${register} closing the connection or answering wrong never costs the values`, async (t) => {
+    const ctx = await setup(t);
+    ctx.unit.closeOn.add(`3:${register}`);
+    ctx.unit.regs.set(902, 200);
+    await ctx.advance(MINUTE + 2 * SECOND, 100);
+    assert.equal(ctx.state('temperature-supply').state, 20);
+    assert.equal(ctx.status().connected, true);
+    assert.ok(
+      ctx.logs.some((l) => new RegExp(`failed \\(closed\\), tried again every hour`).test(l)),
+    );
+    const tries = ctx.unit.log.filter((r) => r.register === register).length;
+    ctx.unit.regs.set(902, 210);
+    await ctx.advance(MINUTE, 100);
+    assert.equal(ctx.state('temperature-supply').state, 21);
+    assert.equal(ctx.unit.log.filter((r) => r.register === register).length, tries, 'skipped');
+  });
+}
+
+test('r1 I1: a state block closing the connection is a failed read (nothing half published)', async (t) => {
+  const ctx = await setup(t);
+  ctx.unit.closeOn.add('3:900');
+  ctx.unit.regs.set(5, 3);
+  await ctx.advance(MINUTE + 2 * SECOND, 100);
+  assert.equal(ctx.status().connected, false);
+  assert.equal(
+    ctx.state('current-mode').text,
+    'normal',
+    'the control block of that read is not applied',
+  );
+});
+
+test('r1 I2.1: a command pressed while a poll writes /data: one connection at a time', async (t) => {
+  const store = memoryStore({ identity: { unit: UNIT, controller: 'C6' } });
+  const ctx = await setup(t, { config: ALLOW, store });
+  const save = store.save.bind(store);
+  store.save = (data) => new Promise((resolve) => setTimeout(() => resolve(save(data)), 300));
+  ctx.unit.delay = 60;
+  await ctx.advance(ctx.app.due - ctx.app.mono() + 50, 10);
+  // The poll is due and waits for /data; the command arrives meanwhile.
+  const ack = ctx.fire('mode', 'boost');
+  await ctx.advance(5000, 10);
+  assert.equal((await ack).success, true);
+  assert.equal(ctx.unit.maxOpen, 1);
+});
+
+test('r1 I2.2: a read asked between two tries of the stop waits for it', async (t) => {
+  const ctx = await setup(t);
+  ctx.unit.closeOnWrite = 1;
+  const ack = ctx.fire('stop');
+  await ctx.advance(60, 5);
+  ctx.app.tick().catch(() => {});
+  await ctx.advance(200, 5);
+  ctx.app.tick().catch(() => {});
+  await ctx.advance(5000, 20);
+  assert.equal((await ack).success, true);
+  assert.equal(ctx.unit.maxOpen, 1);
+  assert.equal(ctx.unit.writes().filter((w) => w.register === 1).length, 2);
+});
+
+test('r1 I2.3: an unknown on/off between two "on" reads resets the count (kept)', async (t) => {
+  const ctx = await setup(t);
+  assert.equal((await ctx.press('stop')).success, true);
+  ctx.unit.regs.set(1, 1);
+  await ctx.advance(MINUTE, 100);
+  ctx.unit.regs.set(1, 7);
+  await ctx.advance(MINUTE, 100);
+  ctx.unit.regs.set(1, 1);
+  await ctx.advance(MINUTE, 100);
+  assert.ok(ctx.app.stopGuard, 'on, unknown, on: still kept');
+  await ctx.advance(MINUTE, 100);
+  assert.equal(ctx.app.stopGuard, undefined);
+});
+
+test('r1 I2.4: the stop retries a refused connection until it is accepted', async (t) => {
+  const ctx = await setup(t);
+  ctx.unit.down = true;
+  setTimeout(() => (ctx.unit.down = false), 1000);
+  const ack = await ctx.press('stop');
+  assert.equal(ack.success, true, String(ack.error));
+  assert.deepEqual(ctx.unit.writes(), [STOP]);
+  assert.ok(ctx.unit.refused >= 2);
+});
+
+test('r1 I2.5: the kept stop is in /data before the first byte; a /data that never answers never holds it', async (t) => {
+  const store = memoryStore();
+  const ctx = await setup(t, { store });
+  let atWrite;
+  ctx.unit.onWrite = () => {
+    atWrite = store.data?.stopGuard;
+  };
+  assert.equal((await ctx.press('stop')).success, true);
+  assert.equal(atWrite?.pending, true);
+  store.save = () => new Promise(() => {});
+  ctx.unit.regs.set(1, 1);
+  const sent = [];
+  ctx.unit.onWrite = () => sent.push(Date.now());
+  const pressed = Date.now();
+  assert.equal((await ctx.press('stop')).success, true);
+  assert.ok(sent[0] - pressed < 400, `written ${sent[0] - pressed} ms after the press`);
+});
+
+test('r1 I2.6: the ack comes within 5 s; a write that cannot leave by 3.5 s is refused unsent', async (t) => {
+  const ctx = await setup(t, { config: ALLOW });
+  ctx.unit.delays['3:1'] = 100;
+  let settled = false;
+  ctx.unit.onWrite = () => {
+    ctx.unit.delays['3:1'] = 9000;
+  };
+  const ack = ctx.fire('mode', 'boost');
+  ack.then(() => (settled = true));
+  await ctx.advance(4400, 20);
+  assert.ok(settled, 'answered by 4.4 s');
+  assert.match(String((await ack).error), /sans confirmation/);
+  // The start lifting a kept stop: a slow /data pushes its write past 3.5 s.
+  ctx.unit.delays = {};
+  ctx.unit.onWrite = undefined;
+  await ctx.advance(30 * SECOND, 100);
+  assert.equal((await ctx.press('stop')).success, true);
+  const writes = ctx.unit.writes().length;
+  for (const key of ['3:1', '3:900', '3:1000']) ctx.unit.delays[key] = 900;
+  const save = ctx.store.save.bind(ctx.store);
+  ctx.store.save = (data) => new Promise((resolve) => setTimeout(() => resolve(save(data)), 1000));
+  const start = await ctx.press('start');
+  assert.match(String(start.error), /trop lentement/);
+  assert.equal(ctx.unit.writes().length, writes, 'nothing written');
+  assert.ok(ctx.app.stopGuard, 'still kept');
+  await ctx.advance(500, 50);
+  assert.ok(ctx.store.data.stopGuard, '/data keeps the stop again');
+});
+
+test('r1 I2.7: the time of a read is in /data before it; no controller read refuses', async (t) => {
+  const store = memoryStore({ identity: { unit: UNIT, controller: 'C6' } });
+  const unit = fakeKomfovent();
+  const savedAt = [];
+  const save = store.save.bind(store);
+  store.save = (data) => {
+    savedAt.push(unit.log.length);
+    return save(data);
+  };
+  const ctx = await setup(t, { config: ALLOW, store, unit });
+  assert.equal(savedAt[0], 0, 'saved before the first request');
+  assert.ok(store.data.lastAttemptAt >= NOW);
+  ctx.unit.regs.set(1000, 0);
+  ctx.unit.regs.set(1001, 0);
+  assert.match(String((await ctx.press('mode', 'boost')).error), /type de régulation/);
+  assert.deepEqual(ctx.unit.writes(), []);
+});
+
+test('r1 I2.8: select strictness, mode list filter, pending default, the 90 s guard, sticky resend', async (t) => {
+  const ctx = await setup(t, { config: ALLOW });
+  for (const bad of ['toString', '__proto__', 'constructor']) {
+    assert.equal((await ctx.press('mode', bad, 100)).success, false, bad);
+  }
+  ctx.unit.regs.set(5, 5);
+  await ctx.advance(MINUTE, 100);
+  assert.equal(ctx.state('current-mode').text, 'kitchen');
+  assert.equal(ctx.state('mode').text, 'normal', 'kitchen is not in the list');
+  ctx.unit.regs.set(5, 2);
+  assert.equal(
+    normalizeMemory({ stopGuard: { unit: 'u', host: 'h', unitId: 1 } }, NOW).stopGuard.pending,
+    true,
+  );
+  // Away not applied: "normal" (as read) is still written under its guard (away may land), not after 90 s.
+  ctx.unit.ignoreWrites = true;
+  await ctx.press('mode', 'away');
+  ctx.unit.ignoreWrites = false;
+  assert.equal((await ctx.press('mode', 'normal')).success, true);
+  assert.equal(ctx.unit.writes().length, 2, 'rewritten under the guard');
+  await ctx.advance(91 * SECOND, 500);
+  assert.equal((await ctx.press('mode', 'normal')).success, true);
+  assert.equal(ctx.unit.writes().length, 2, 'already so after the guard');
+  // An unconfirmed away, then 91 s: its guard is gone, "normal" (as read) is already so.
+  ctx.unit.ignoreWrites = true;
+  await ctx.press('mode', 'away');
+  ctx.unit.ignoreWrites = false;
+  const writes = ctx.unit.writes().length;
+  await ctx.advance(91 * SECOND, 500);
+  assert.equal((await ctx.press('mode', 'normal')).success, true);
+  assert.equal(ctx.unit.writes().length, writes, 'the guard ended: nothing written');
+});
+
+test('r1 I2.8: a sticky stop stays sticky when resent, the resend a second after the read', async (t) => {
+  const ctx = await setup(t, { config: ALLOW });
+  ctx.unit.regs.set(1, 0);
+  ctx.unit.ignoreWrites = true;
+  await ctx.press('start');
+  ctx.unit.ignoreWrites = false;
+  assert.equal((await ctx.press('stop')).success, true);
+  const reads = [];
+  const push = ctx.unit.log.push.bind(ctx.unit.log);
+  ctx.unit.log.push = (e) => {
+    if (e.fc === 3 && e.register === 1) reads.push(Date.now());
+    if (e.fc === 6) e.at = Date.now();
+    return push(e);
+  };
+  ctx.unit.regs.set(1, 1);
+  await ctx.advance(30 * SECOND, 100);
+  const resend = ctx.unit.log.filter((e) => e.fc === 6).at(-1);
+  assert.equal(ctx.app.stopGuard.sticky, true);
+  const before = reads.filter((r) => r < resend.at).at(-1);
+  assert.ok(resend.at - before >= SECOND, `resent ${resend.at - before} ms after the read`);
+});
+
+test('r1 I3: a poll due while a command holds the line runs a second after it, never in a loop', async (t) => {
+  const ctx = await setup(t, { config: ALLOW });
+  let runs = 0;
+  const run = ctx.app.run.bind(ctx.app);
+  ctx.app.run = () => {
+    runs += 1;
+    return run();
+  };
+  await ctx.advance(ctx.app.due - ctx.app.mono() - 300, 50);
+  for (const key of ['3:1', '3:900', '3:1000']) ctx.unit.delays[key] = 900;
+  const before = runs;
+  const ack = ctx.fire('mode', 'boost');
+  let done = false;
+  ack.then(() => (done = true));
+  while (!done) await ctx.advance(10, 10);
+  assert.ok(runs - before <= 6, `${runs - before} runs`);
+  ctx.unit.delays = {};
+  const polls = ctx.unit.log.length;
+  await ctx.advance(2500, 50);
+  assert.ok(
+    ctx.unit.log.slice(polls).some((r) => r.fc === 3 && r.register === 600),
+    'the postponed poll ran right after the command',
+  );
+});
+
+test('r1 I4: an invalid configuration does not stop the stop (address of /data)', async (t) => {
+  const ctx = await setup(t);
+  await ctx.gladys.fake.configUpdated({ host: 'bad host!' });
+  await ctx.advance(500, 50);
+  const ack = await ctx.press('stop');
+  assert.equal(ack.success, true, String(ack.error));
+  assert.deepEqual(ctx.unit.writes(), [STOP]);
+  assert.equal(ctx.unit.hosts.at(-1), HOST);
+});
+
+test('r1 m3: a start refused by the unit keeps the stop kept', async (t) => {
+  const ctx = await setup(t, { config: ALLOW });
+  assert.equal((await ctx.press('stop')).success, true);
+  ctx.unit.exceptions.add('6:1');
+  const ack = await ctx.press('start');
+  assert.match(String(ack.error), /a refusé/);
+  assert.ok(ctx.app.stopGuard);
+  assert.ok(ctx.store.data.stopGuard);
+});
+
+test('r1 m4/m5: a new press resets the resends; a press at the end of a stop starts a new one', async (t) => {
+  const ctx = await setup(t);
+  ctx.unit.ignoreWrites = true;
+  await ctx.press('stop');
+  await ctx.advance(6 * MINUTE, 200);
+  assert.equal(ctx.app.stopGuard.reasserts, 3);
+  await ctx.press('stop');
+  assert.equal(ctx.app.stopGuard.reasserts, 0, 'a press starts the count again');
+  // A press 3 s into a stop that cannot write: it gets its own stop after it.
+  ctx.unit.ignoreWrites = false;
+  ctx.unit.closeOnWrite = 1000;
+  const first = ctx.fire('stop');
+  await ctx.advance(3000, 20);
+  const second = ctx.fire('stop');
+  await ctx.advance(700, 20);
+  ctx.unit.closeOnWrite = 0;
+  await ctx.advance(6000, 20);
+  assert.equal((await first).success, false);
+  assert.equal((await second).success, true, 'the late press sent its own stop');
+});
+
+test('r1 I2: the start is refused between two tries of a stop', async (t) => {
+  const ctx = await setup(t, { config: ALLOW });
+  ctx.unit.regs.set(1, 0);
+  ctx.unit.closeOnWrite = 1;
+  const stop = ctx.fire('stop');
+  await ctx.advance(60, 5);
+  assert.equal(ctx.app.active, undefined, 'in the gap between two tries');
+  const start = ctx.fire('start');
+  await ctx.advance(5000, 20);
+  assert.match(String((await start).error), /arrêtée entre-temps/);
+  assert.equal((await stop).success, true);
+  assert.ok(!ctx.unit.writes().some((w) => w.value === 1 && w.register === 1), 'no start written');
+});
+
+test('r1 I2: /data repairs a time in the future and texts that are not alarm codes', () => {
+  assert.equal(normalizeMemory({ lastAttemptAt: NOW + HOUR }, NOW).lastAttemptAt, NOW);
+  const ids = { feature: (role) => role };
+  for (const junk of ['0', '12', 'F9; W1', 'none, F1', '']) {
+    const states = deviceStates(ids, { alarmCodes: junk });
+    assert.ok(!states.some((s) => s.device_feature_external_id === 'alarm-codes'), junk);
+  }
+  assert.equal(deviceStates(ids, { alarmCodes: 'F9, W1' })[0].text, 'F9, W1');
+});
+
+test('r1 I2: a state block that keeps timing out is never skipped', async (t) => {
+  const ctx = await setup(t);
+  ctx.unit.silent.add('3:900');
+  for (let i = 0; i < 4; i += 1) await ctx.advance(MINUTE, 100);
+  ctx.unit.silent.clear();
+  ctx.unit.regs.set(902, 250);
+  await ctx.advance(MINUTE + 3 * SECOND, 100);
+  assert.equal(ctx.state('temperature-supply').state, 25);
+});
+
+test('r1 I2: an unreadable controller type is never "another unit"', async (t) => {
+  const ctx = await setup(t);
+  ctx.unit.regs.set(1000, 0);
+  ctx.unit.regs.set(1001, 0);
+  await ctx.advance(MINUTE + SECOND, 100);
+  assert.ok(!ctx.logs.some((l) => /controller type changed/.test(l)));
+  assert.doesNotMatch(ctx.status().message.fr, /a changé/);
+});
+
+test('r1 I2: values out of the bounds of their feature are never published', () => {
+  const ids = { feature: (role) => role };
+  const states = deviceStates(ids, {
+    panelHumidity: 150,
+    fanSupply: 101,
+    filter: -1,
+    supply: 130,
+    aq1: 6000,
+    aq1Type: 'co2',
+    aq2: 120,
+    aq2Type: 'humidity',
+  });
+  assert.deepEqual(states, []);
+});
+
+test('r1 I2: two commands at once: the second is refused busy', async (t) => {
+  const ctx = await setup(t, { config: ALLOW });
+  const a = ctx.fire('mode', 'boost');
+  const b = ctx.fire('mode', 'away');
+  await ctx.advance(5000, 20);
+  assert.equal((await a).success, true);
+  assert.match(String((await b).error), /encore en cours/);
+  assert.equal(ctx.unit.writes().length, 1);
+});
+
+test('r1 I2: a resend planned before a start pressed in its second is dropped', async (t) => {
+  const ctx = await setup(t, { config: ALLOW });
+  ctx.unit.ignoreWrites = true;
+  await ctx.press('stop');
+  ctx.unit.ignoreWrites = false;
+  let guard = 0;
+  while (!ctx.logs.some((l) => /stop sent again/.test(l)) && guard < 2000) {
+    await ctx.advance(10, 5);
+    guard += 1;
+  }
+  // The unit is on: the start is "already so" and lifts the kept stop.
+  const start = ctx.fire('start');
+  await ctx.advance(5000, 20);
+  assert.equal((await start).success, true);
+  assert.equal(ctx.app.stopGuard, undefined);
+  const writes = ctx.unit.writes();
+  assert.equal(writes.filter((w) => w.value === 0).length, 1, 'the resend never left');
+  assert.equal(ctx.unit.regs.get(1), 1);
 });

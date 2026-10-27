@@ -6,9 +6,10 @@
 // - An answer is one MBAP frame (7-byte header + PDU), its length read from
 //   the header and bounded (at most 260 bytes, as Modbus TCP allows), kept in
 //   a fixed buffer, in as many TCP segments as it comes. It must carry the
-//   transaction id of the request, protocol 0, the unit id asked and the
-//   function code sent (or its exception): anything else, bytes beyond the
-//   frame, or bytes with no request waiting, break the session. A request
+//   transaction id of the request, protocol 0 and the function code sent (or
+//   its exception); its unit id may differ (noted, not refused). Anything
+//   else, bytes beyond the frame, or bytes with no request waiting, break the
+//   session. A request
 //   whose answer is late ends the session too: a late answer is never taken
 //   for the next request.
 // - Every wait is bounded: the connection and each answer.
@@ -122,13 +123,16 @@ export class ModbusSession {
     const pending = this.pending;
     const header = this.frame;
     const pdu = Buffer.from(this.frame.subarray(MBAP_SIZE, size));
-    if (
-      header.readUInt16BE(0) !== pending.transaction ||
-      header.readUInt16BE(2) !== 0 ||
-      header[6] !== this.unitId
-    ) {
+    if (header.readUInt16BE(0) !== pending.transaction || header.readUInt16BE(2) !== 0) {
       this.fail(new ModbusError(ERROR_KINDS.PROTOCOL, 'answer to another request'));
       return;
+    }
+    // The unit id of the answer is not checked: one TCP connection reaches one
+    // controller, and some Modbus TCP servers answer with their own id
+    // whatever was asked. The transaction id, the protocol, the function and
+    // the exact size still tie the answer to its request. Kept for the status.
+    if (header[6] !== this.unitId) {
+      this.otherUnitId = header[6];
     }
     if (pdu[0] === (pending.fc | 0x80)) {
       if (pdu.length !== 2) {

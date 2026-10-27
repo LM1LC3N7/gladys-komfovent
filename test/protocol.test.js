@@ -121,7 +121,6 @@ test('decodeBlock firmware and sensor types', () => {
   const c6 = 0x01311014;
   assert.deepEqual(decodeBlock(BLOCK_OF.firmware, [c6 >>> 16, c6 & 0xffff]), {
     controller: 'C6',
-    firmware: 'C6 1.3.17.20',
   });
   const c8 = 0x21005003;
   assert.equal(decodeBlock(BLOCK_OF.firmware, [c8 >>> 16, c8 & 0xffff]).controller, 'C8');
@@ -190,7 +189,14 @@ test('session: MBAP framing, unit id, answers in chunks', async () => {
 test('session: hostile answers end it', async () => {
   const cases = [
     ['another transaction', (s) => answer(s, [3, 2, 0, 2], { tid: 0xbeef })],
-    ['another unit id', (s) => answer(s, [3, 2, 0, 2], { uid: 9 })],
+    [
+      'another protocol',
+      (s) => {
+        const b = answer(s, [3, 2, 0, 2]);
+        b.writeUInt16BE(1, 2);
+        return b;
+      },
+    ],
     ['another function', (s) => answer(s, [4, 2, 0, 2])],
     ['bytes beyond the frame', (s) => Buffer.concat([answer(s, [3, 2, 0, 2]), Buffer.from([0])])],
     [
@@ -217,6 +223,19 @@ test('session: hostile answers end it', async () => {
   socket.emit('data', Buffer.from([0, 1, 0, 0, 0, 3, 1, 3, 0]));
   assert.ok(socket.destroyed, 'bytes without a request');
   assert.ok(session.dead);
+});
+
+test('session: an answer with another unit id is accepted (noted), the transaction still checked', async () => {
+  const socket = new Socket();
+  const session = new ModbusSession(socket, { unitId: 1 });
+  const pending = session.request(readRequest({ fc: 3, address: 1, count: 1 }), {
+    timeoutMs: 1000,
+  });
+  socket.emit('data', answer(socket, [3, 2, 0, 7], { uid: 254 }));
+  assert.deepEqual([...(await pending)], [3, 2, 0, 7]);
+  assert.equal(session.otherUnitId, 254);
+  assert.equal(session.dead, undefined);
+  session.close();
 });
 
 test('session: an exception is REFUSED (sent), the session stays', async () => {
@@ -272,7 +291,7 @@ test('config: addresses, port, unit id (strict), interval', () => {
     assert.equal(c.address, undefined, String(bad));
     assert.equal(c.badUnitId, true, String(bad));
   }
-  assert.equal(normalizeConfig({ host: 'x', unit_id: null }).unitId, 254, 'missing: the default');
+  assert.equal(normalizeConfig({ host: 'x', unit_id: null }).unitId, 1, 'missing: the default');
   assert.equal(normalizeConfig({ poll_interval: '' }).pollInterval, 60);
   assert.equal(normalizeConfig({ poll_interval: 5 }).pollInterval, 30);
   assert.equal(normalizeConfig({ allow_commands: 'yes' }).allowCommands, false);

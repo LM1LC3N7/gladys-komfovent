@@ -67,11 +67,11 @@
         "fr": "Identifiant d’unité Modbus"
       },
       "description": {
-        "en": "The Modbus unit id the controller answers, 254 unless you changed it.",
-        "fr": "L’identifiant d’unité Modbus auquel répond la régulation, 254 sauf si vous l’avez changé."
+        "en": "1 unless your unit answers another one (then the \"Modbus RTU protocol ID\" of its web page, Settings, Connectivity).",
+        "fr": "1 sauf si votre centrale répond sur un autre (alors le « Modbus RTU protocol ID » de sa page web, Settings, Connectivity)."
       },
       "required": false,
-      "default": 254,
+      "default": 1,
       "min": 1,
       "max": 255
     },

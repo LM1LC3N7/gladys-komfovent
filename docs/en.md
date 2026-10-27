@@ -14,8 +14,11 @@ integration (Home Assistant) uses them; please report what you see.
   reachable from Gladys on **port 502**. Give it a fixed IP address in your
   router (factory address: 192.168.0.60).
 - Modbus TCP has **no password**: keep the unit on a trusted network.
-- The Modbus unit id is 254 by default (hass-komfovent's value); change it
-  only if your unit answers another one.
+- The Modbus unit id is 1 by default. Komfovent's manuals give no unit id
+  for Modbus TCP, and hass-komfovent sends none (its Modbus library then
+  sends 1). If your unit does not answer, set the "Modbus RTU protocol ID"
+  shown on its web page (Settings, Connectivity) in "Modbus unit id". An
+  answer carrying another unit id is accepted.
 
 ## Installation
 
@@ -59,8 +62,12 @@ interval. Reads outside the interval:
 - a new address or unit id saved is read at once.
 
 The alarms, the sensor types and the firmware version are read last: when
-they do not answer, the values read before are published anyway, and the
-failing block is tried again once an hour.
+they fail (a Modbus exception, no answer, the connection closed, a wrong
+answer), the values read before are published anyway, and the failing block
+is tried again once an hour.
+
+A humidity sensor is always named "Extract humidity", even when it is set on
+the unit as the outdoor humidity sensor (register 216, not read).
 
 ## Commands
 
@@ -90,12 +97,13 @@ never reaches the ventilation.
 the option, on another command (a command not written yet is cancelled), on
 a read in progress or stuck (it is interrupted), on a failed read or a wait
 between two tries, on the controller type, on /data, nor on the
-configuration not read again from Gladys yet (it then goes to the address
-kept in /data). It is tried again for 3.5 s after the press.
+configuration not read again from Gladys yet or made invalid since (it then
+goes to the address of the kept stop, else the last valid one kept in
+/data). It is tried again for 3.5 s after the press.
 
 It can fail in these cases only, and the answer says so:
 
-- no address known (never configured): "not sent";
+- no address known (never a valid one configured): "not sent";
 - the unit cannot be reached within 3.5 s: "not sent" (or "not sent yet"
   while it still tries);
 - the unit answers a Modbus exception 1, 2 or 3: "refused";

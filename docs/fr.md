@@ -15,9 +15,12 @@ hass-komfovent (Home Assistant) ; merci de signaler ce que vous constatez.
   dans votre routeur (adresse d’usine : 192.168.0.60).
 - Le Modbus TCP n’a **pas de mot de passe** : gardez la centrale sur un
   réseau de confiance.
-- L’identifiant d’unité Modbus vaut 254 par défaut (valeur de
-  hass-komfovent) ; changez-le seulement si votre centrale répond sur un
-  autre.
+- L’identifiant d’unité Modbus vaut 1 par défaut. Les manuels de Komfovent
+  n’en donnent pas pour le Modbus TCP, et hass-komfovent n’en envoie pas (sa
+  bibliothèque Modbus envoie alors 1). Si la centrale ne répond pas, reportez
+  dans « Identifiant d’unité Modbus » le « Modbus RTU protocol ID » affiché
+  sur sa page web (Settings, Connectivity). Une réponse portant un autre
+  identifiant est acceptée.
 
 ## Installation
 
@@ -64,8 +67,13 @@ intervalle :
   aussitôt.
 
 Les alarmes, les types de sondes et la version du micrologiciel sont lus en
-dernier : s’ils ne répondent pas, les valeurs lues avant sont publiées quand
-même, et le bloc en échec est relu une fois par heure.
+dernier : s’ils échouent (exception Modbus, pas de réponse, connexion coupée,
+réponse de travers), les valeurs lues avant sont publiées quand même, et le
+bloc en échec est relu une fois par heure.
+
+Une sonde d’humidité s’appelle toujours « Humidité extraite », même si elle
+est réglée sur la centrale comme sonde d’humidité extérieure (registre 216,
+non lu).
 
 ## Commandes
 
@@ -98,12 +106,13 @@ dépend **ni** de l’option, **ni** d’une autre commande (une commande pas
 encore écrite est annulée), **ni** d’une lecture en cours ou bloquée (elle
 est interrompue), **ni** d’un échec de lecture ou d’une attente entre deux
 essais, **ni** du type de régulation, **ni** de /data, **ni** de la
-configuration pas encore relue depuis Gladys (il part alors vers l’adresse
+configuration pas encore relue depuis Gladys ou devenue invalide (il part
+alors vers l’adresse de l’arrêt gardé, sinon la dernière adresse valide
 gardée dans /data). Il est réessayé pendant 3,5 s après l’appui.
 
 Il peut échouer dans ces cas seulement, et la réponse le dit :
 
-- aucune adresse connue (jamais configurée) : « non envoyée » ;
+- aucune adresse connue (jamais d’adresse valide configurée) : « non envoyée » ;
 - la centrale n’est pas joignable dans les 3,5 s : « non envoyée » (ou « pas
   encore envoyé » s’il essaie encore) ;
 - la centrale répond une exception Modbus 1, 2 ou 3 : « refusée » ;
